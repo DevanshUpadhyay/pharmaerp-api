@@ -37,6 +37,12 @@ const invoiceSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    businessDayId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BusinessDay",
+      default: null,
+      index: true,
+    },
     invoiceNo: {
       type: String,
       required: true,

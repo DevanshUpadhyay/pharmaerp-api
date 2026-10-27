@@ -18,6 +18,7 @@ import CustomerAdvanceTransaction from "../../../parties/customers/models/custom
 import CustomerCreditTransaction from "../../../parties/customers/models/customerCreditTransaction.model.js";
 import { CUSTOMER_TRANSACTION_TYPE } from "../../../parties/customers/constants/customer.constant.js";
 import { Shift } from "../../../operations/shifts/shift.model.js";
+import BusinessDay from "../../../operations/business-days/businessDay.model.js";
 import branchCashRepository from "../../../finance/treasury/cash-management/branch-cash/repositories/branchCash.repository.js";
 import cashTransactionService from "../../../finance/treasury/cash-management/cash-transactions/services/cashTransaction.service.js";
 import { decomposeCashAmount } from "../../../parties/customers/services/customerAdvance.service.js";
@@ -369,24 +370,50 @@ const recordCustomerReturn = async (
       }
     }
 
-    // 5. Auto-resolve open shift for branch
+    // 5. Shift and Business Day Gatekeeper Resolution
     let resolvedShiftId = returnData.shiftId || null;
-    if (resolvedShiftId && mongoose.Types.ObjectId.isValid(resolvedShiftId)) {
-      const shiftDoc = await Shift.findById(resolvedShiftId).session(session);
-      if (!shiftDoc || shiftDoc.status !== "open") {
-        resolvedShiftId = null;
+    let resolvedBusinessDayId = null;
+
+    if (resolvedBranchId) {
+      const [openBusinessDay, candidateShift] = await Promise.all([
+        BusinessDay.findOne({
+          branchId: resolvedBranchId,
+          status: "open",
+        }).session(session),
+        resolvedShiftId
+          ? Shift.findById(resolvedShiftId).session(session)
+          : Shift.findOne({
+              branchId: resolvedBranchId,
+              status: "open",
+            }).session(session),
+      ]);
+
+      const isDayClosed = !openBusinessDay;
+      const isShiftClosed = !candidateShift || candidateShift.status !== "open";
+
+      if (isDayClosed && isShiftClosed) {
+        throw new ApiError(
+          400,
+          "Cannot process return. The shift is closed, the business day is closed. Please open a business day and shift before processing returns."
+        );
       }
-    }
-    if (!resolvedShiftId && resolvedBranchId) {
-      const activeOpenShift = await Shift.findOne({
-        workspaceId: workspaceId || customer.workspaceId,
-        companyId: companyId || customer.companyId,
-        branchId: resolvedBranchId,
-        status: "open",
-      }).session(session);
-      if (activeOpenShift) {
-        resolvedShiftId = activeOpenShift._id;
+
+      if (isDayClosed) {
+        throw new ApiError(
+          400,
+          "Cannot process return. The Business Day is closed for this branch. Please open a Business Day before processing returns."
+        );
       }
+
+      if (isShiftClosed) {
+        throw new ApiError(
+          400,
+          "Cannot process return. The shift is closed. Please open a new shift before processing returns."
+        );
+      }
+
+      resolvedBusinessDayId = openBusinessDay._id;
+      resolvedShiftId = candidateShift._id;
     }
 
     const grandTotal = Number(returnData.grandTotal || 0);
@@ -539,6 +566,7 @@ const recordCustomerReturn = async (
       date: returnData.date || new Date(),
       financialPeriodId,
       shiftId: resolvedShiftId || null,
+      businessDayId: resolvedBusinessDayId || null,
       billingMode: returnData.billingMode || "B2C",
       subtotal: returnData.subtotal || 0,
       discount: returnData.discount || 0,

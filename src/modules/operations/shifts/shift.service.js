@@ -171,6 +171,7 @@ export const closeShift = async (
   let pureUpiCount = 0;
   let creditSalesTotal = 0;
   let creditInvoiceCount = 0;
+  let advanceSalesTotal = 0;
   let advanceInvoiceCount = 0;
 
   // Return metrics tracking
@@ -961,137 +962,32 @@ export const closeShift = async (
     console.error("[Shift] Error flushing legacy pending UPI bank transactions:", btFlushErr);
   }
 
-  // 2. Standard Shift-Consolidated UPI Settlement:
-  // If no legacy individual transactions were flushed, aggregate net UPI collections by bank account
-  // and create EXACTLY ONE BankTransaction and JournalVoucher per bank account.
-  if (!hasLegacyPendingFlushed) {
+  // 2. Business Day Consolidated UPI Settlement:
+  // Shift close NO LONGER creates individual or shift-level BankTransactions in Treasury.
+  // All net UPI collections (sales, advances, credit settlements) are held in SYS-UPI-CLEARING
+  // and will be consolidated into exactly ONE BankTransaction per bank account when the Business Day is closed.
+  shift.upiSettlementStatus = "PENDING_BUSINESS_DAY_CLOSE";
+
+  // If this shift was opened without a businessDayId (e.g. opened before migration),
+  // automatically link it to the currently open BusinessDay for this branch
+  if (!shift.businessDayId && shift.branchId) {
     try {
-      // Find fallback primary active bank account if unlinked/unattributed QRs exist
-      const defaultBank =
-        (await BankAccount.findOne({
-          companyId: shift.companyId,
-          workspaceId: shift.workspaceId,
-          isDeleted: false,
-          isActive: true,
-          isPrimary: true,
-        })) ||
-        (await BankAccount.findOne({
-          companyId: shift.companyId,
-          workspaceId: shift.workspaceId,
-          isDeleted: false,
-          isActive: true,
-        }));
-
-      const bankTotalsMap = new Map();
-
-      // Aggregate from Sales UPI breakdown
-      for (const item of (shift.upiBreakdown || [])) {
-        const amt = Number(item.totalAmount || 0);
-        if (amt <= 0) continue;
-        const bankId = item.bankAccountId
-          ? String(item.bankAccountId)
-          : (defaultBank ? String(defaultBank._id) : null);
-        if (!bankId) continue;
-
-        if (!bankTotalsMap.has(bankId)) {
-          bankTotalsMap.set(bankId, {
-            bankAccountId: bankId,
-            bankName: item.bankName || "Bank Account",
-            totalAmount: 0,
-            transactionCount: 0,
-            billCount: 0,
-          });
-        }
-        const entry = bankTotalsMap.get(bankId);
-        entry.totalAmount += amt;
-        entry.transactionCount += Number(item.transactionCount || 0);
-        entry.billCount += Number(item.billCount || 0);
-      }
-
-      // Aggregate from Customer Advance & Credit Settlement UPI breakdown
-      for (const item of (shift.advanceCreditUpiBreakdown || [])) {
-        const amt = Number(item.totalAmount || 0);
-        if (amt <= 0) continue;
-        const bankId = item.bankAccountId
-          ? String(item.bankAccountId)
-          : (defaultBank ? String(defaultBank._id) : null);
-        if (!bankId) continue;
-
-        if (!bankTotalsMap.has(bankId)) {
-          bankTotalsMap.set(bankId, {
-            bankAccountId: bankId,
-            bankName: item.bankName || "Bank Account",
-            totalAmount: 0,
-            transactionCount: 0,
-            billCount: 0,
-          });
-        }
-        const entry = bankTotalsMap.get(bankId);
-        entry.totalAmount += amt;
-        entry.transactionCount += Number(item.transactionCount || 0);
-      }
-
-      // Safety Fallback: If bankTotalsMap is empty but shift has recorded positive UPI collections,
-      // attribute the total UPI collection to the default bank so funds are never trapped!
-      const totalRecordedUpi = Math.round(
-        Number(
-          shift.actualClosingUpiAmount ||
-          shift.expectedClosingUpiAmount ||
-          ((Number(shift.salesUpiTotal || 0)) + (Number(shift.advanceUpiTotal || 0)) + (Number(shift.creditUpiTotal || 0)))
-        ) * 100
-      ) / 100;
-
-      if (bankTotalsMap.size === 0 && totalRecordedUpi > 0 && defaultBank?._id) {
-        const defaultBankId = String(defaultBank._id);
-        bankTotalsMap.set(defaultBankId, {
-          bankAccountId: defaultBankId,
-          bankName: defaultBank.bankMasterId?.name || defaultBank.accountName || "Bank Account",
-          totalAmount: totalRecordedUpi,
-          transactionCount: 1,
-          billCount: 1,
+      const openBusinessDay = await BusinessDay.findOne({
+        branchId: shift.branchId,
+        status: "open",
+      });
+      if (openBusinessDay) {
+        shift.businessDayId = openBusinessDay._id;
+        await BusinessDay.findByIdAndUpdate(openBusinessDay._id, {
+          $addToSet: { shifts: shift._id },
         });
       }
-
-      const upiClearingAccount = await getUpiClearingAccount(
-        shift.workspaceId,
-        shift.companyId,
-        userId
-      );
-
-
-      for (const [bankId, bankData] of bankTotalsMap.entries()) {
-        const netAmount = Math.round(Number(bankData.totalAmount) * 100) / 100;
-        if (netAmount <= 0) continue;
-
-        const totalTxCount = bankData.transactionCount || bankData.billCount || 1;
-        const shiftDisplay = shift.shiftName || shift.shiftNo || "Shift";
-
-        const settlementPayload = {
-          transactionDate: now,
-          bankAccountId: bankId,
-          transactionType: BANK_TRANSACTION_TYPE.UPI,
-          paymentMode: BANK_TRANSACTION_PAYMENT_MODE.UPI,
-          category: BANK_TRANSACTION_CATEGORY.UPI_SETTLEMENT,
-          direction: BANK_TRANSACTION_DIRECTION.CREDIT,
-          amount: netAmount,
-          referenceNumber: `SHIFT-${shift.shiftNo}`,
-          narration: `${shiftDisplay} UPI Settlement (${totalTxCount} payments)`,
-          counterpartyAccountId: upiClearingAccount?._id || null,
-          shiftId: shift._id,
-          status: BANK_TRANSACTION_STATUS.POSTED,
-        };
-
-        await bankTransactionService.createBankTransaction(
-          shift.workspaceId,
-          shift.companyId,
-          userId,
-          settlementPayload
-        );
-      }
-    } catch (settleErr) {
-      console.error("[Shift] Error creating consolidated UPI bank transactions at shift close:", settleErr);
+    } catch (bdLinkErr) {
+      console.warn("[Shift] Could not auto-link legacy shift to open BusinessDay:", bdLinkErr.message);
     }
   }
+
+  console.log(`[Shift] Shift ${shift.shiftNo} closed. UPI collections held for Business Day settlement.`);
 
   await shift.save();
   return shift;

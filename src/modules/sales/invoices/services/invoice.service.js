@@ -28,6 +28,7 @@ import branchCashRepository from "../../../finance/treasury/cash-management/bran
 import CashTransaction from "../../../finance/treasury/cash-management/cash-transactions/models/cashTransaction.model.js";
 import BankTransaction from "../../../finance/treasury/bank-management/bank-transactions/models/bankTransaction.model.js";
 import { Shift } from "../../../operations/shifts/shift.model.js";
+import { BusinessDay } from "../../../operations/business-days/businessDay.model.js";
 import CustomerAdvanceTransaction from "../../../parties/customers/models/customerAdvanceTransaction.model.js";
 import CustomerCreditTransaction from "../../../parties/customers/models/customerCreditTransaction.model.js";
 import customerAdvanceService from "../../../parties/customers/services/customerAdvance.service.js";
@@ -988,11 +989,10 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
     _lastTime = now;
   };
 
-  const session = existingSession || await mongoose.startSession();
-  if (!existingSession) session.startTransaction();
+  let session = existingSession || null;
 
   try {
-    _logTime('Session started');
+    _logTime('Validation started');
     
     // Calculate Financial Year string early for prefix
     const saleDateObj = saleData.date ? new Date(saleData.date) : new Date();
@@ -1108,17 +1108,65 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
     resolvedPaymentQrId = null;
   }
 
-  // Auto-resolve active open shift for branch if not explicitly provided
-  let resolvedShiftId = saleData.shiftId || null;
-  if (!resolvedShiftId && resolvedBranchId) {
-    const activeOpenShift = await Shift.findOne({
-      companyId: companyId || customer.companyId,
-      branchId: resolvedBranchId,
-      status: "open",
-    }).session(session);
-    if (activeOpenShift) {
-      resolvedShiftId = activeOpenShift._id;
+  // ── BUSINESS DAY & SHIFT GATEKEEPER ENFORCEMENT ───────────────────────────
+  // A sale bill CANNOT be created unless there is an OPEN Business Day
+  // and an OPEN Shift for this branch. This prevents stale/bypassed billing
+  // if another user or browser session closed the shift or business day.
+  let resolvedShiftId = null;
+  let resolvedBusinessDayId = null;
+
+  if (resolvedBranchId) {
+    // 1. Concurrently fetch open Business Day and candidate Shift
+    const [openBusinessDay, candidateShift] = await Promise.all([
+      BusinessDay.findOne({
+        branchId: resolvedBranchId,
+        status: "open",
+      }),
+      saleData.shiftId
+        ? Shift.findById(saleData.shiftId)
+        : Shift.findOne({
+            branchId: resolvedBranchId,
+            status: "open",
+          }),
+    ]);
+
+    const isDayClosed = !openBusinessDay;
+    const isShiftClosed = !candidateShift || candidateShift.status !== "open";
+
+    if (isDayClosed && isShiftClosed) {
+      throw new ApiError(
+        400,
+        "Cannot create sale bill. The shift is closed, the business day is closed. Please open a business day and shift before billing."
+      );
     }
+
+    if (isDayClosed) {
+      throw new ApiError(
+        400,
+        "Cannot create sale bill. The Business Day is closed for this branch. Please open a Business Day before billing."
+      );
+    }
+
+    if (isShiftClosed) {
+      throw new ApiError(
+        400,
+        "Cannot create sale bill. The shift is closed. Please open a new shift before billing."
+      );
+    }
+
+    if (candidateShift.branchId && candidateShift.branchId.toString() !== resolvedBranchId.toString()) {
+      throw new ApiError(400, "Cannot create sale bill. Specified shift does not belong to this branch.");
+    }
+
+    if (candidateShift.businessDayId && candidateShift.businessDayId.toString() !== openBusinessDay._id.toString()) {
+      throw new ApiError(
+        400,
+        "Cannot create sale bill. Active shift does not belong to the open Business Day."
+      );
+    }
+
+    resolvedBusinessDayId = openBusinessDay._id;
+    resolvedShiftId = candidateShift._id;
   }
 
   // Compute credit and advance portions
@@ -1231,6 +1279,7 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
     date: saleData.date || new Date(),
     financialPeriodId,
     shiftId: resolvedShiftId || null,
+    businessDayId: resolvedBusinessDayId || null,
     billingMode: saleData.billingMode || "B2C",
     subtotal: saleData.subtotal || 0,
     discount: saleData.discount || 0,
@@ -1256,7 +1305,11 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
     createdByName: user?.name || null,
     createdByEmail: user?.email || null,
   };
-  _logTime('Data setup completed');
+  // Start database transaction now that all gatekeeper validations and reads have succeeded
+  if (!session) {
+    session = await mongoose.startSession();
+    session.startTransaction();
+  }
 
   const savedInvoice = await invoiceRepository.createInvoice(newSale, { session });
   _logTime('Invoice created in DB');
@@ -1323,7 +1376,7 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
 
     return savedInvoice;
   } catch (error) {
-    if (!existingSession) {
+    if (!existingSession && session) {
       try {
         await session.abortTransaction();
       } catch (abortErr) {
@@ -1355,7 +1408,18 @@ const updateCustomerSale = async (invoiceId, customerId, saleData, companyId, wo
       throw new ApiError(400, "Cannot edit a cancelled invoice");
     }
 
-    // Shift-gate check: Only allow update if shift is open (or invoice has no shift assigned)
+    // Shift-gate and Business Day-gate check
+    if (existingInvoice.branchId) {
+      const openBusinessDay = await BusinessDay.findOne({
+        branchId: existingInvoice.branchId,
+        status: "open",
+      }).session(session);
+
+      if (!openBusinessDay) {
+        throw new ApiError(400, "Cannot edit sale bill. The Business Day is closed for this branch.");
+      }
+    }
+
     if (existingInvoice.shiftId) {
       const shift = await Shift.findById(existingInvoice.shiftId).session(session);
       if (shift && shift.status !== "open") {

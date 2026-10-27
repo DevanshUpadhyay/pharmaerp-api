@@ -531,6 +531,18 @@ const shiftSchema = new mongoose.Schema(
         amount: { type: Number, default: 0 },
       },
     },
+
+    // ── UPI Settlement Status (Held until Business Day Close) ─────────────
+    upiSettlementStatus: {
+      type: String,
+      enum: ["PENDING_BUSINESS_DAY_CLOSE", "SETTLED", "NOT_APPLICABLE"],
+      default: "PENDING_BUSINESS_DAY_CLOSE",
+      index: true,
+    },
+    upiSettledAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
