@@ -3,6 +3,7 @@ import ApiError from "../../../../utils/ApiError.js";
 import invoiceRepository from "../repositories/invoice.repository.js";
 import { getBranchInitials } from "../../../../utils/branchInitials.js";
 import customerRepository from "../../../parties/customers/repositories/customer.repository.js";
+import customerService from "../../../parties/customers/services/customer.service.js";
 import branchRepository from "../../../organization/branches/repositories/branch.repository.js";
 import financialPeriodRepository from "../../../finance/financial-periods/repositories/financialPeriod.repository.js";
 import Batch from "../../../catalog/products/models/batch.model.js";
@@ -36,6 +37,12 @@ import { CUSTOMER_TRANSACTION_TYPE, CREDIT_STATUS } from "../../../parties/custo
 import Customer from "../../../parties/customers/models/customer.model.js";
 import SharedContactGroup from "../../../parties/customers/models/sharedContactGroup.model.js";
 import CustomerRelationship from "../../../parties/customers/models/customerRelationship.model.js";
+import creditNoteService from "../../credit-notes/services/creditNote.service.js";
+
+const isCreditNotePayment = (pType) => {
+  const s = String(pType || "").toLowerCase().replace(/[\s_-]/g, "");
+  return s === "creditnote";
+};
 
 /**
  * Validates that all cash payments have explicit denomination breakdowns
@@ -122,19 +129,20 @@ const revertCashTransactionsForInvoice = async (
 
 const validateCashDenominations = (saleData) => {
   const paymentsList = Array.isArray(saleData.payments) ? saleData.payments : [];
-  const methodLower = String(saleData.paymentMethod || "").toLowerCase();
+  const methodLower = String(saleData.paymentMethod || "").toLowerCase().replace(/[\s_-]/g, "");
   const isCreditMethod = methodLower === "credit";
   const isAdvanceMethod = methodLower === "advance";
+  const isCreditNoteMethod = methodLower === "creditnote";
 
-  // Skip cash denomination check if entirely non-cash (Credit or Advance)
+  // Skip cash denomination check if entirely non-cash (Credit, Advance, or CreditNote)
   const allNonCash =
     paymentsList.length > 0 &&
     paymentsList.every((p) => {
-      const pType = String(p.paymentType || p.mode || "").toLowerCase();
-      return pType === "credit" || pType === "advance";
+      const pType = String(p.paymentType || p.mode || "").toLowerCase().replace(/[\s_-]/g, "");
+      return pType === "credit" || pType === "advance" || pType === "creditnote";
     });
 
-  if (allNonCash || ((isCreditMethod || isAdvanceMethod) && paymentsList.length === 0)) {
+  if (allNonCash || ((isCreditMethod || isAdvanceMethod || isCreditNoteMethod) && paymentsList.length === 0)) {
     return;
   }
 
@@ -513,6 +521,11 @@ const postSaleAccounting = async ({
           paymentType: "credit",
           amount: invoice.grandTotal
         });
+      } else if (isCreditNotePayment(invoice.paymentMethod) && paymentsList.length === 0) {
+        paymentsList.push({
+          paymentType: "creditnote",
+          amount: invoice.grandTotal
+        });
       }
 
       // Compute credit and advance portions
@@ -547,6 +560,8 @@ const postSaleAccounting = async ({
           needsReceiptJv += 1; // fallback JV
         } else if (String(p.paymentType || p.mode).toLowerCase() === "advance") {
           needsReceiptJv += 1; // Customer Advance adjustment JV
+        } else if (isCreditNotePayment(p.paymentType || p.mode)) {
+          needsReceiptJv += 1; // Credit Note redemption JV
         }
       }
 
@@ -968,6 +983,51 @@ const postSaleAccounting = async ({
             { $inc: { advanceBalance: -amount } },
             { session }
           );
+        } else if (isCreditNotePayment(paymentType)) {
+          let customerLedgerAccountId = customer?.ledgerAccountId;
+          if (!customerLedgerAccountId) {
+            const customerAccount = await customerAdvanceService.ensureCustomerLedgerAccount(
+              customer,
+              invoice.workspaceId,
+              invoice.companyId,
+              user?._id,
+              session
+            );
+            customerLedgerAccountId = customerAccount?._id;
+          }
+
+          if (customerLedgerAccountId) {
+            const creditNoteJvPayload = {
+              voucherNumber: nextReceiptJv(),
+              voucherDate: invoice.date || new Date(),
+              voucherType: "CREDIT_NOTE",
+              referenceNumber: invoice.invoiceNo,
+              narration: `Payment from Credit Note for Invoice ${invoice.invoiceNo}`,
+              status: "POSTED",
+              lines: [
+                {
+                  accountId: customerLedgerAccountId,
+                  debit: amount,
+                  credit: 0,
+                  narration: `Credit Note redemption applied to Invoice ${invoice.invoiceNo}`,
+                },
+                {
+                  accountId: receiptCounterpartyId,
+                  debit: 0,
+                  credit: amount,
+                  narration: `Sales from Invoice ${invoice.invoiceNo} (Credit Note)`,
+                },
+              ],
+            };
+
+            await journalVoucherService.createJournalVoucher(
+              invoice.workspaceId,
+              invoice.companyId,
+              user?._id,
+              creditNoteJvPayload,
+              { session }
+            );
+          }
         }
       }
     }
@@ -1006,7 +1066,7 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
     }
 
     // Fetch all required reference data concurrently to eliminate sequential network latency
-    const [
+    let [
       customer,
       activeBranches,
       periods,
@@ -1017,7 +1077,9 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
       primaryBankAccount,
       defaultBankAccount
     ] = await Promise.all([
-      customerRepository.findCustomerById(customerId, companyId, workspaceId),
+      (customerId
+        ? customerRepository.findCustomerById(customerId, companyId, workspaceId)
+        : customerRepository.findWalkInCustomer(companyId, workspaceId)),
       branchRepository.getCompanyBranches(companyId),
       financialPeriodRepository.getPeriods(workspaceId, companyId, { isCurrent: true, all: true }),
       Company.findOne({ _id: companyId, workspaceId }),
@@ -1027,6 +1089,10 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
       BankAccount.findOne({ companyId, workspaceId, isDeleted: false, isActive: true, isPrimary: true }),
       BankAccount.findOne({ companyId, workspaceId, isDeleted: false, isActive: true }),
     ]);
+
+  if (!customer && !customerId) {
+    customer = await customerService.findOrCreateWalkInCustomer(workspaceId, companyId, user?._id);
+  }
 
   if (!customer) {
     throw new ApiError(404, "Customer not found");
@@ -1169,23 +1235,49 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
     resolvedShiftId = candidateShift._id;
   }
 
-  // Compute credit and advance portions
+  // Compute credit, advance, and credit note portions
   const grandTotal = Number(saleData.grandTotal || 0);
   const paymentsList = Array.isArray(saleData.payments) ? saleData.payments : [];
-  const primaryMethodLower = String(saleData.paymentMethod || "").toLowerCase();
+  const primaryMethodLower = String(saleData.paymentMethod || "").toLowerCase().replace(/[\s_-]/g, "");
 
   let creditPortion = 0;
   let advancePortion = 0;
+  let creditNotePortion = 0;
+  let creditNoteAllocations = [];
 
   if (paymentsList.length > 0) {
     for (const p of paymentsList) {
-      const pType = String(p.paymentType || p.mode || "").toLowerCase();
+      const pType = String(p.paymentType || p.mode || "").toLowerCase().replace(/[\s_-]/g, "");
       if (pType === "credit") creditPortion += Number(p.amount || 0);
       if (pType === "advance") advancePortion += Number(p.amount || 0);
+      if (pType === "creditnote") {
+        creditNotePortion += Number(p.amount || 0);
+        if (Array.isArray(p.creditNoteAllocations) && p.creditNoteAllocations.length > 0) {
+          creditNoteAllocations.push(...p.creditNoteAllocations);
+        }
+      }
     }
   } else {
     if (primaryMethodLower === "credit") creditPortion = grandTotal;
     if (primaryMethodLower === "advance") advancePortion = grandTotal;
+    if (primaryMethodLower === "creditnote") creditNotePortion = grandTotal;
+  }
+
+  if (Array.isArray(saleData.creditNoteAllocations) && saleData.creditNoteAllocations.length > 0) {
+    creditNoteAllocations.push(...saleData.creditNoteAllocations);
+  }
+
+  // ── WALK-IN CUSTOMER ENFORCEMENT ───────────────────────────
+  if (customer.isWalkIn) {
+    if (creditPortion > 0) {
+      throw new ApiError(400, "Credit sale is not allowed for Walk-in Customer.");
+    }
+    if (advancePortion > 0) {
+      throw new ApiError(400, "Advance payment is not allowed for Walk-in Customer.");
+    }
+    if (creditNotePortion > 0) {
+      throw new ApiError(400, "Credit Note redemption is not allowed for Walk-in Customer.");
+    }
   }
 
   // 1. Advance validation
@@ -1200,6 +1292,17 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
       throw new ApiError(
         400,
         `Insufficient advance balance for "${customer.name}". Available: ₹${availableAdvance.toFixed(2)}, Required: ₹${advancePortion.toFixed(2)}.`
+      );
+    }
+  }
+
+  // 2. Credit Note balance validation
+  if (creditNotePortion > 0) {
+    const availableCreditNoteBal = Number(customer.creditNoteBalance || 0);
+    if (availableCreditNoteBal < creditNotePortion - 0.01) {
+      throw new ApiError(
+        400,
+        `Insufficient Credit Note balance for "${customer.name}". Available: ₹${availableCreditNoteBal.toFixed(2)}, Required: ₹${creditNotePortion.toFixed(2)}.`
       );
     }
   }
@@ -1297,6 +1400,8 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
     creditStatus: creditPortion > 0 ? "PENDING" : "NA",
     creditPaidAmount: 0,
     creditTransactionId: null,
+    creditNoteTotal: creditNotePortion,
+    creditNoteAllocations: [],
     items: Array.isArray(saleData.items) ? saleData.items : [],
     doctor: saleData.doctor || saleData.doctorName || null,
     doctorId: saleData.doctorId || null,
@@ -1313,6 +1418,25 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
 
   const savedInvoice = await invoiceRepository.createInvoice(newSale, { session });
   _logTime('Invoice created in DB');
+
+  // Redeem Credit Notes if invoice has credit note portion
+  if (creditNotePortion > 0) {
+    const redemptionResult = await creditNoteService.redeemCreditNotesForInvoice(
+      customer._id,
+      creditNotePortion,
+      savedInvoice,
+      {
+        session,
+        user,
+        shiftId: resolvedShiftId || null,
+        creditNoteAllocations,
+      }
+    );
+    savedInvoice.creditNoteTotal = redemptionResult.totalRedeemed;
+    savedInvoice.creditNoteAllocations = redemptionResult.redeemedNotes;
+    await savedInvoice.save({ session });
+    _logTime('Credit notes redeemed and invoice updated');
+  }
 
   // Create CustomerCreditTransaction if invoice has credit portion
   if (creditPortion > 0) {
@@ -1436,6 +1560,25 @@ const updateCustomerSale = async (invoiceId, customerId, saleData, companyId, wo
       throw new ApiError(404, "Customer not found");
     }
 
+    if (customer.isWalkIn) {
+      const paymentsList = Array.isArray(saleData.payments) ? saleData.payments : [];
+      const hasCredit = String(saleData.paymentMethod || "").toLowerCase() === "credit" ||
+        paymentsList.some((p) => String(p.paymentType || p.mode || "").toLowerCase().includes("credit"));
+      if (hasCredit) {
+        throw new ApiError(400, "Credit sale is not allowed for Walk-in Customer.");
+      }
+      const hasAdvance = String(saleData.paymentMethod || "").toLowerCase() === "advance" ||
+        paymentsList.some((p) => String(p.paymentType || p.mode || "").toLowerCase().includes("advance"));
+      if (hasAdvance) {
+        throw new ApiError(400, "Advance payment is not allowed for Walk-in Customer.");
+      }
+      const hasCreditNote = String(saleData.paymentMethod || "").toLowerCase().includes("creditnote") ||
+        paymentsList.some((p) => String(p.paymentType || p.mode || "").toLowerCase().includes("creditnote"));
+      if (hasCreditNote) {
+        throw new ApiError(400, "Credit Note redemption is not allowed for Walk-in Customer.");
+      }
+    }
+
     // 1. Revert Old Inventory (Add quantities back)
     await revertInvoiceInventory(existingInvoice.items, existingInvoice.branchId, session);
 
@@ -1450,6 +1593,14 @@ const updateCustomerSale = async (invoiceId, customerId, saleData, companyId, wo
       companyId,
       user?._id || user?.id,
       session
+    );
+
+    // Revert old credit notes if any
+    await creditNoteService.revertInvoiceCreditNotes(
+      existingInvoice._id,
+      companyId,
+      workspaceId,
+      { session }
     );
 
     // 4. Resolve paymentQrId for UPI attribution
@@ -1533,6 +1684,42 @@ const updateCustomerSale = async (invoiceId, customerId, saleData, companyId, wo
       existingInvoice.updatedBy = user._id;
       existingInvoice.updatedByName = user.name || null;
       existingInvoice.updatedByEmail = user.email || null;
+    }
+
+    // Re-redeem credit notes if update contains credit note portion
+    const updatedPayments = Array.isArray(saleData.payments) ? saleData.payments : existingInvoice.payments;
+    let updateCreditNotePortion = 0;
+    let updateCreditNoteAllocations = [];
+    if (Array.isArray(updatedPayments) && updatedPayments.length > 0) {
+      for (const p of updatedPayments) {
+        if (isCreditNotePayment(p.paymentType || p.mode)) {
+          updateCreditNotePortion += Number(p.amount || 0);
+          if (Array.isArray(p.creditNoteAllocations) && p.creditNoteAllocations.length > 0) {
+            updateCreditNoteAllocations.push(...p.creditNoteAllocations);
+          }
+        }
+      }
+    } else if (isCreditNotePayment(saleData.paymentMethod || existingInvoice.paymentMethod)) {
+      updateCreditNotePortion = Number(saleData.grandTotal !== undefined ? saleData.grandTotal : existingInvoice.grandTotal);
+    }
+
+    if (updateCreditNotePortion > 0) {
+      const redemptionResult = await creditNoteService.redeemCreditNotesForInvoice(
+        customer._id,
+        updateCreditNotePortion,
+        existingInvoice,
+        {
+          session,
+          user,
+          shiftId: existingInvoice.shiftId || null,
+          creditNoteAllocations: updateCreditNoteAllocations,
+        }
+      );
+      existingInvoice.creditNoteTotal = redemptionResult.totalRedeemed;
+      existingInvoice.creditNoteAllocations = redemptionResult.redeemedNotes;
+    } else {
+      existingInvoice.creditNoteTotal = 0;
+      existingInvoice.creditNoteAllocations = [];
     }
 
     await existingInvoice.save({ session });
@@ -1878,6 +2065,14 @@ const cancelCustomerSale = async (
         );
       }
     }
+
+    // Revert any credit note redemption for this invoice to restore customer's credit note balance
+    await creditNoteService.revertInvoiceCreditNotes(
+      invoice._id,
+      companyId,
+      workspaceId,
+      { session }
+    );
 
     // Shift-gate check: Only allow cancellation if shift is open (or invoice has no shift assigned)
     const { Shift } = await import("../../../operations/shifts/shift.model.js");

@@ -135,6 +135,15 @@ const invoiceSchema = new mongoose.Schema(
       ref: "CustomerCreditTransaction",
       default: null,
     },
+    creditNoteTotal: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    creditNoteAllocations: {
+      type: Array,
+      default: [],
+    },
     cancelledAt: {
       type: Date,
       default: null,

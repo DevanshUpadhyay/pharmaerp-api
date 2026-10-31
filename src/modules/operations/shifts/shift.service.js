@@ -173,6 +173,9 @@ export const closeShift = async (
   let creditInvoiceCount = 0;
   let advanceSalesTotal = 0;
   let advanceInvoiceCount = 0;
+  let creditNoteSalesTotal = 0;
+  let creditNoteInvoiceCount = 0;
+  let returnCreditNoteTotal = 0;
 
   // Return metrics tracking
   let returnInvoiceCount = 0;
@@ -187,6 +190,7 @@ export const closeShift = async (
     cash: { count: 0, amount: 0 },
     advance: { count: 0, amount: 0 },
     credit: { count: 0, amount: 0 },
+    creditNote: { count: 0, amount: 0 },
     upi: { count: 0, amount: 0 },
     split: { count: 0, amount: 0 },
     other: { count: 0, amount: 0 },
@@ -324,7 +328,9 @@ export const closeShift = async (
               returnUpiTotal += amt;
             } else if (pt.includes("ADVANCE") || pt.includes("WALLET")) {
               returnAdvanceTotal += amt;
-            } else if (pt.includes("CREDIT")) {
+            } else if (pt.includes("CREDIT_NOTE") || pt.includes("CREDITNOTE")) {
+            creditNoteSalesTotal += amt;
+          } else if (pt.includes("CREDIT")) {
               returnCreditTotal += amt;
             }
           }
@@ -337,6 +343,10 @@ export const closeShift = async (
         returnCreditTotal += billTotal;
         returnBreakdown.credit.count += 1;
         returnBreakdown.credit.amount += billTotal;
+        returnCreditNoteTotal += billTotal;
+        if (!returnBreakdown.creditNote) returnBreakdown.creditNote = { count: 0, amount: 0 };
+        returnBreakdown.creditNote.count += 1;
+        returnBreakdown.creditNote.amount += billTotal;
       } else if (pMethod.includes("UPI") || pMethod.includes("QR")) {
         upiSalesTotal -= billTotal;
         returnUpiTotal += billTotal;
@@ -440,6 +450,9 @@ export const closeShift = async (
             : inv.grandTotal || 0;
         pureCashAmount += cashCollected;
         totalCashSales += cashCollected;
+      } else if (pMethod.includes("CREDIT_NOTE") || pMethod.includes("CREDITNOTE")) {
+        creditNoteInvoiceCount += 1;
+        creditNoteSalesTotal += inv.grandTotal || 0;
       } else if (pMethod.includes("CREDIT")) {
         creditInvoiceCount += 1;
         creditSalesTotal += inv.grandTotal || 0;
@@ -679,6 +692,8 @@ export const closeShift = async (
   shift.creditInvoiceCount = creditInvoiceCount;
   shift.advanceSalesTotal = advanceSalesTotal;
   shift.advanceInvoiceCount = advanceInvoiceCount;
+  shift.creditNoteSalesTotal = creditNoteSalesTotal;
+  shift.creditNoteInvoiceCount = creditNoteInvoiceCount;
   shift.cancelledInvoiceCount = cancelledInvoiceCount;
   shift.cancelledSalesTotal = cancelledSalesTotal;
   shift.cancelledCashTotal = cancelledCashTotal;
@@ -694,6 +709,7 @@ export const closeShift = async (
   shift.returnUpiTotal = returnUpiTotal;
   shift.returnAdvanceTotal = returnAdvanceTotal;
   shift.returnCreditTotal = returnCreditTotal;
+  shift.returnCreditNoteTotal = returnCreditNoteTotal;
   shift.returnSplitTotal = returnSplitTotal;
   shift.returnInvoices = returnInvoices;
   shift.returnBreakdown = returnBreakdown;

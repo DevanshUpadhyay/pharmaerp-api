@@ -170,6 +170,18 @@ const salesReturnSchema = new mongoose.Schema(
       ref: "CustomerCreditTransaction",
       default: null,
     },
+    creditNoteId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CreditNote",
+      default: null,
+      index: true,
+    },
+    creditNoteNo: {
+      type: String,
+      default: null,
+      trim: true,
+      index: true,
+    },
     gstLedgerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "GstLedgerEntry",

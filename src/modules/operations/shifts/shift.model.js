@@ -276,6 +276,16 @@ const shiftSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    creditNoteSalesTotal: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    creditNoteInvoiceCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     // Per-QR and per-Bank UPI collections breakdown (populated at shift close)
     upiBreakdown: [
       {
@@ -478,6 +488,11 @@ const shiftSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    returnCreditNoteTotal: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     returnSplitTotal: {
       type: Number,
       default: 0,
@@ -515,6 +530,10 @@ const shiftSchema = new mongoose.Schema(
         amount: { type: Number, default: 0 },
       },
       credit: {
+        count: { type: Number, default: 0 },
+        amount: { type: Number, default: 0 },
+      },
+      creditNote: {
         count: { type: Number, default: 0 },
         amount: { type: Number, default: 0 },
       },
