@@ -207,6 +207,9 @@ export const closeShift = async (
     cash: { count: 0, amount: 0 },
     upi: { count: 0, amount: 0 },
     split: { count: 0, amount: 0 },
+    creditNote: { count: 0, amount: 0 },
+    advance: { count: 0, amount: 0 },
+    credit: { count: 0, amount: 0 },
     card: { count: 0, amount: 0 },
     wallet: { count: 0, amount: 0 },
     other: { count: 0, amount: 0 },
@@ -272,6 +275,15 @@ export const closeShift = async (
         cancelledCashTotal += billTotal;
         cancelledBreakdown.cash.count += 1;
         cancelledBreakdown.cash.amount += billTotal;
+      } else if (pMethod.includes("CREDIT_NOTE") || pMethod.includes("CREDITNOTE")) {
+        cancelledBreakdown.creditNote.count += 1;
+        cancelledBreakdown.creditNote.amount += billTotal;
+      } else if (pMethod.includes("ADVANCE")) {
+        cancelledBreakdown.advance.count += 1;
+        cancelledBreakdown.advance.amount += billTotal;
+      } else if (pMethod.includes("CREDIT")) {
+        cancelledBreakdown.credit.count += 1;
+        cancelledBreakdown.credit.amount += billTotal;
       } else if (pMethod.includes("CARD")) {
         cancelledBreakdown.card.count += 1;
         cancelledBreakdown.card.amount += billTotal;
@@ -401,6 +413,7 @@ export const closeShift = async (
       let billSplitUpi = 0;
       let hasCreditInBill = false;
       let hasAdvanceInBill = false;
+      let hasCreditNoteInBill = false;
       if (Array.isArray(inv.payments) && inv.payments.length > 0) {
         for (const p of inv.payments) {
           const pt = String(p.paymentType || p.mode || "").toUpperCase();
@@ -409,16 +422,19 @@ export const closeShift = async (
             billSplitUpi += amt;
             upiSalesTotal += amt;
             _trackUpi(p.paymentQrId || inv.paymentQrId, amt, inv._id, true);
+          } else if (pt.includes("CREDIT_NOTE") || pt.includes("CREDITNOTE")) {
+            creditNoteSalesTotal += amt;
+            hasCreditNoteInBill = true;
           } else if (pt.includes("CREDIT")) {
             creditSalesTotal += amt;
             hasCreditInBill = true;
           } else if (pt.includes("ADVANCE") || pt.includes("WALLET")) {
             advanceSalesTotal += amt;
             hasAdvanceInBill = true;
-          } else if (
-            pt.includes("CASH") ||
-            (!pt.includes("CARD"))
-          ) {
+          } else if (pt.includes("CASH")) {
+            billSplitCash += amt;
+            totalCashSales += amt;
+          } else if (!pt.includes("CARD")) {
             billSplitCash += amt;
             totalCashSales += amt;
           }
@@ -432,6 +448,7 @@ export const closeShift = async (
       }
       if (hasCreditInBill) creditInvoiceCount += 1;
       if (hasAdvanceInBill) advanceInvoiceCount += 1;
+      if (hasCreditNoteInBill) creditNoteInvoiceCount += 1;
       splitCashAmount += billSplitCash;
       splitUpiAmount += billSplitUpi;
     } else {

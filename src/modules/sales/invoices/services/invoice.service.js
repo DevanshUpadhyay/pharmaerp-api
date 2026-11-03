@@ -185,6 +185,17 @@ const validateCashDenominations = (saleData) => {
       d => Number(d.quantity) > 0 && Number(d.denomination) > 0
     );
 
+    if (denoms.length === 0 && cp.amount > 0) {
+      const autoDecomposed = branchCashRepository.decomposeCashAmount(cp.amount);
+      if (autoDecomposed.length > 0) {
+        cp.denominations = autoDecomposed;
+        denoms.push(...autoDecomposed);
+        if (paymentsList[cp.index]) {
+          paymentsList[cp.index].denominations = autoDecomposed;
+        }
+      }
+    }
+
     if (denoms.length === 0) {
       throw new ApiError(
         400,
@@ -229,6 +240,56 @@ const validateCashDenominations = (saleData) => {
       if ((!cashRow.returnedDenominations || cashRow.returnedDenominations.length === 0) && Array.isArray(saleData.returnedDenominations) && saleData.returnedDenominations.length > 0) {
         cashRow.returnedDenominations = saleData.returnedDenominations;
       }
+    }
+  }
+};
+
+/**
+ * Enforce strict payment total exact match with bill grand total.
+ * When payments array is provided:
+ * 1. Every payment row must have amount > 0 and be finite.
+ * 2. The sum of all payment mode amounts MUST exactly equal saleData.grandTotal (tolerance 0.01).
+ *    Customer cannot pay even a single penny more (overpayment) or less (underpayment) than the bill amount.
+ *    Any shortfall must be explicitly allocated to a payment mode such as Credit (Udhar / Pay Later).
+ */
+export const validatePaymentSplitIntegrity = (saleData) => {
+  if (!saleData) return;
+
+  const grandTotal = Math.round(Number(saleData.grandTotal || 0) * 100) / 100;
+
+  if (Array.isArray(saleData.payments) && saleData.payments.length > 0) {
+    let totalPaymentAmount = 0;
+
+    for (let i = 0; i < saleData.payments.length; i++) {
+      const p = saleData.payments[i];
+      const amt = Number(p.amount);
+      const mode = p.paymentType || p.mode || `Payment #${i + 1}`;
+
+      if (isNaN(amt) || !isFinite(amt)) {
+        throw new ApiError(400, `Invalid payment amount for "${mode}". Must be a valid number.`);
+      }
+
+      if (amt < 0) {
+        throw new ApiError(400, `Payment amount for "${mode}" cannot be negative (₹${amt.toFixed(2)}).`);
+      }
+
+      totalPaymentAmount += amt;
+    }
+
+    totalPaymentAmount = Math.round(totalPaymentAmount * 100) / 100;
+
+    if (totalPaymentAmount > grandTotal + 0.01) {
+      throw new ApiError(
+        400,
+        `Total payment amount (₹${totalPaymentAmount.toFixed(2)}) exceeds bill grand total (₹${grandTotal.toFixed(2)}). Customer cannot pay more than the bill amount.`
+      );
+    }
+
+    if (totalPaymentAmount < grandTotal - 0.01) {
+      throw new ApiError(
+        400,
+        `Total payment amount (₹${totalPaymentAmount.toFixed(2)}) is less than bill grand total (₹${grandTotal.toFixed(2)}). Any unpaid balance must be allocated to Credit (Pay Later / Udhar).`
+      );
     }
   }
 };
@@ -565,23 +626,22 @@ const postSaleAccounting = async ({
         }
       }
 
-      const salePromises = [];
-      const receiptPromises = [];
-      
-      if (needsSaleJv) salePromises.push(voucherNumberService.generateVoucherNumber(invoice.companyId, invoice.workspaceId, "SALE", { session }));
+      const saleRes = [];
+      if (needsSaleJv) {
+        const sNum = await voucherNumberService.generateVoucherNumber(invoice.companyId, invoice.workspaceId, "SALE", { session });
+        saleRes.push(sNum);
+      }
+
+      const receiptRes = [];
       for (let i = 0; i < needsReceiptJv; i++) {
-        receiptPromises.push(voucherNumberService.generateVoucherNumber(invoice.companyId, invoice.workspaceId, "JOURNAL", { session }));
+        const rNum = await voucherNumberService.generateVoucherNumber(invoice.companyId, invoice.workspaceId, "JOURNAL", { session });
+        receiptRes.push(rNum);
       }
 
       let baseCashTx = null;
       if (needsCashTx > 0) {
         baseCashTx = await cashTransactionRepository.getNextTransactionNumber(invoice.companyId, invoice.workspaceId, { session });
       }
-
-      const [saleRes, receiptRes] = await Promise.all([
-        Promise.all(salePromises),
-        Promise.all(receiptPromises)
-      ]);
 
       const cashTxRes = [];
       
@@ -601,40 +661,54 @@ const postSaleAccounting = async ({
       const nextCashTx = () => cashTxRes[cashTxIdx++];
 
       // 1. If customer bought on credit, create the SALE JV (Customer -> Sales) for creditPortion ONLY
-      if (customer.ledgerAccountId && preSaleJv && creditPortion > 0) {
-        const saleJvPayload = {
-          voucherNumber: preSaleJv,
-          voucherDate: invoice.date || new Date(),
-          voucherType: "SALE",
-          referenceNumber: invoice.invoiceNo,
-          narration: `Credit Sale against Invoice ${invoice.invoiceNo} for ${customer.name || "Customer"}`,
-          status: "POSTED",
-          lines: [
-            {
-              accountId: customer.ledgerAccountId,
-              debit: creditPortion,
-              credit: 0,
-              narration: `Credit due for Invoice ${invoice.invoiceNo}`
-            },
-            {
-              accountId: salesAccount._id,
-              debit: 0,
-              credit: creditPortion,
-              narration: `Sales from Invoice ${invoice.invoiceNo}`
-            }
-          ]
-        };
-        
-        try {
-          await journalVoucherService.createJournalVoucher(
+      if (preSaleJv && creditPortion > 0) {
+        let customerLedgerAccountId = customer?.ledgerAccountId;
+        if (!customerLedgerAccountId) {
+          const customerAccount = await customerAdvanceService.ensureCustomerLedgerAccount(
+            customer,
             invoice.workspaceId,
             invoice.companyId,
             user?._id,
-            saleJvPayload,
-            { session }
+            session
           );
-        } catch (jvErr) {
-          console.error("--- FAILED TO CREATE CREDIT SALES JV ---", jvErr);
+          customerLedgerAccountId = customerAccount?._id;
+        }
+
+        if (customerLedgerAccountId) {
+          const saleJvPayload = {
+            voucherNumber: preSaleJv,
+            voucherDate: invoice.date || new Date(),
+            voucherType: "SALE",
+            referenceNumber: invoice.invoiceNo,
+            narration: `Credit Sale against Invoice ${invoice.invoiceNo} for ${customer.name || "Customer"}`,
+            status: "POSTED",
+            lines: [
+              {
+                accountId: customerLedgerAccountId,
+                debit: creditPortion,
+                credit: 0,
+                narration: `Credit due for Invoice ${invoice.invoiceNo}`
+              },
+              {
+                accountId: salesAccount._id,
+                debit: 0,
+                credit: creditPortion,
+                narration: `Sales from Invoice ${invoice.invoiceNo}`
+              }
+            ]
+          };
+          
+          try {
+            await journalVoucherService.createJournalVoucher(
+              invoice.workspaceId,
+              invoice.companyId,
+              user?._id,
+              saleJvPayload,
+              { session }
+            );
+          } catch (jvErr) {
+            console.error("--- FAILED TO CREATE CREDIT SALES JV ---", jvErr);
+          }
         }
       }
 
@@ -644,7 +718,8 @@ const postSaleAccounting = async ({
       const receiptNarrationSuffix = "Sale";
 
       for (const payment of paymentsList) {
-        const paymentType = String(payment.paymentType || payment.mode || "").toLowerCase();
+        try {
+          const paymentType = String(payment.paymentType || payment.mode || "").toLowerCase();
         const amount = Number(payment.amount || 0);
         
         if (amount <= 0) continue;
@@ -673,6 +748,10 @@ const postSaleAccounting = async ({
 
               if (receivedAmount === 0 && receivedDenoms.length === 0) {
                 receivedAmount = Number(payment.amount || amount || 0);
+              }
+
+              if (receivedAmount > 0 && (receivedDenoms.length === 0 || receivedDenoms.every(d => Number(d.quantity) === 0))) {
+                receivedDenoms = branchCashRepository.decomposeCashAmount(receivedAmount);
               }
 
               let changeAmount = returnedDenoms.reduce((sum, d) => sum + (Number(d.denomination) * Number(d.quantity)), 0);
@@ -1000,7 +1079,7 @@ const postSaleAccounting = async ({
             const creditNoteJvPayload = {
               voucherNumber: nextReceiptJv(),
               voucherDate: invoice.date || new Date(),
-              voucherType: "CREDIT_NOTE",
+              voucherType: "JOURNAL",
               referenceNumber: invoice.invoiceNo,
               narration: `Payment from Credit Note for Invoice ${invoice.invoiceNo}`,
               status: "POSTED",
@@ -1029,14 +1108,23 @@ const postSaleAccounting = async ({
             );
           }
         }
+      } catch (paymentErr) {
+        console.error(
+          `Error processing split payment leg (${payment?.paymentType || payment?.mode}) for invoice ${invoice.invoiceNo}:`,
+          paymentErr
+        );
       }
     }
+  }
   } catch (jvErr) {
     console.error("Error generating journal vouchers for sale bill:", jvErr);
   }
 };
 
 const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, user = null, existingSession = null) => {
+  // Enforce strict payment total exact match with bill grand total
+  validatePaymentSplitIntegrity(saleData);
+
   // Enforce mandatory cash denomination breakdown
   validateCashDenominations(saleData);
 
@@ -1464,6 +1552,13 @@ const recordCustomerSale = async (customerId, saleData, companyId, workspaceId, 
 
     savedInvoice.creditTransactionId = creditTx._id;
     await savedInvoice.save({ session });
+
+    // Update customer creditOutstanding in DB
+    await Customer.findByIdAndUpdate(
+      customer._id,
+      { $inc: { creditOutstanding: creditPortion } },
+      { session }
+    );
   }
 
   // Deduct inventory from Batch and ProductFacility
@@ -1551,6 +1646,12 @@ const updateCustomerSale = async (invoiceId, customerId, saleData, companyId, wo
       }
     }
 
+    // Enforce strict payment total exact match with bill grand total
+    validatePaymentSplitIntegrity({
+      ...saleData,
+      grandTotal: saleData.grandTotal !== undefined ? saleData.grandTotal : existingInvoice.grandTotal,
+    });
+
     // Enforce cash denominations validation if payment involves cash
     validateCashDenominations(saleData);
 
@@ -1598,8 +1699,8 @@ const updateCustomerSale = async (invoiceId, customerId, saleData, companyId, wo
     // Revert old credit notes if any
     await creditNoteService.revertInvoiceCreditNotes(
       existingInvoice._id,
-      companyId,
-      workspaceId,
+      companyId || existingInvoice.companyId,
+      workspaceId || existingInvoice.workspaceId,
       { session }
     );
 
@@ -2038,13 +2139,25 @@ const cancelCustomerSale = async (
       );
     }
 
-    // Cancel linked CustomerCreditTransaction if pending
+    // Cancel linked CustomerCreditTransaction if pending and restore creditOutstanding
     if (invoice.creditTransactionId || invoice.creditStatus === "PENDING") {
+      const pendingCredits = await CustomerCreditTransaction.find({
+        invoiceId: invoice._id,
+        status: "PENDING",
+      }).session(session);
+      const totalCreditToCancel = pendingCredits.reduce((s, c) => s + (Number(c.balanceDue) || 0), 0);
       await CustomerCreditTransaction.updateMany(
         { invoiceId: invoice._id, status: "PENDING" },
         { status: "CANCELLED" },
         { session }
       );
+      if (invoice.customerId && totalCreditToCancel > 0) {
+        await Customer.findByIdAndUpdate(
+          invoice.customerId,
+          { $inc: { creditOutstanding: -totalCreditToCancel } },
+          { session }
+        );
+      }
     }
 
     // Revert any advance deduction for this invoice to restore customer's advance balance
@@ -2069,8 +2182,8 @@ const cancelCustomerSale = async (
     // Revert any credit note redemption for this invoice to restore customer's credit note balance
     await creditNoteService.revertInvoiceCreditNotes(
       invoice._id,
-      companyId,
-      workspaceId,
+      companyId || invoice.companyId,
+      workspaceId || invoice.workspaceId,
       { session }
     );
 
@@ -2227,3 +2340,4 @@ export default {
   getNextInvoiceNumber,
   getInvoiceById,
 };
+

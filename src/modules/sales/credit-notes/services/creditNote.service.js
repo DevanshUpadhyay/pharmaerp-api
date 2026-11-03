@@ -133,6 +133,14 @@ export const redeemCreditNotesForInvoice = async (
   const neededAmount = Math.round(Number(amountToRedeem) * 100) / 100;
   if (neededAmount <= 0) return { redeemedNotes: [], totalRedeemed: 0 };
 
+  const invoiceGrandTotal = invoice?.grandTotal !== undefined ? Math.round(Number(invoice.grandTotal) * 100) / 100 : null;
+  if (invoiceGrandTotal !== null && invoiceGrandTotal > 0 && neededAmount > invoiceGrandTotal + 0.01) {
+    throw new ApiError(
+      400,
+      `Credit note redemption amount (₹${neededAmount.toFixed(2)}) cannot exceed invoice grand total (₹${invoiceGrandTotal.toFixed(2)})`
+    );
+  }
+
   const customer = await Customer.findOne({
     _id: customerId,
     isDeleted: false,
@@ -280,17 +288,26 @@ export const redeemCreditNotesForInvoice = async (
  */
 export const revertInvoiceCreditNotes = async (
   invoiceId,
-  companyId,
-  workspaceId,
+  companyId = null,
+  workspaceId = null,
   options = {}
 ) => {
   const session = options.session || null;
+  if (!invoiceId) return { totalRestored: 0 };
 
-  const notesWithRedemption = await CreditNote.find({
-    workspaceId: new mongoose.Types.ObjectId(workspaceId),
-    companyId: new mongoose.Types.ObjectId(companyId),
-    "redemptions.invoiceId": new mongoose.Types.ObjectId(invoiceId),
-  }).session(session);
+  const query = {
+    "redemptions.invoiceId": mongoose.Types.ObjectId.isValid(invoiceId)
+      ? new mongoose.Types.ObjectId(invoiceId)
+      : invoiceId,
+  };
+  if (companyId && mongoose.Types.ObjectId.isValid(companyId)) {
+    query.companyId = new mongoose.Types.ObjectId(companyId);
+  }
+  if (workspaceId && mongoose.Types.ObjectId.isValid(workspaceId)) {
+    query.workspaceId = new mongoose.Types.ObjectId(workspaceId);
+  }
+
+  const notesWithRedemption = await CreditNote.find(query).session(session);
 
   let totalRestored = 0;
   let customerId = null;

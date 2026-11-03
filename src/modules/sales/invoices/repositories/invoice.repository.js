@@ -527,8 +527,14 @@ const getAllInvoices = async (companyId, workspaceId, filters = {}, pagination =
       totalAmount += grandTotal;
       let hasCash = false;
       let hasUpi = false;
+      let hasCreditNote = false;
+      let hasAdvance = false;
+      let hasCredit = false;
       let invoiceCashPortion = 0;
       let invoiceUpiPortion = 0;
+      let invoiceCreditNotePortion = 0;
+      let invoiceAdvancePortion = 0;
+      let invoiceCreditPortion = 0;
 
       if (Array.isArray(inv.payments) && inv.payments.length > 0) {
         for (const p of inv.payments) {
@@ -537,10 +543,19 @@ const getAllInvoices = async (companyId, workspaceId, filters = {}, pagination =
           if (type.includes("UPI") || type.includes("QR")) {
             invoiceUpiPortion += amt;
             hasUpi = true;
+          } else if (type.includes("CREDIT_NOTE") || type.includes("CREDITNOTE")) {
+            invoiceCreditNotePortion += amt;
+            hasCreditNote = true;
+          } else if (type.includes("CREDIT")) {
+            invoiceCreditPortion += amt;
+            hasCredit = true;
+          } else if (type.includes("ADVANCE") || type.includes("WALLET")) {
+            invoiceAdvancePortion += amt;
+            hasAdvance = true;
           } else if (type.includes("CASH")) {
             invoiceCashPortion += amt;
             hasCash = true;
-          } else if (!type.includes("CARD") && !type.includes("WALLET") && !type.includes("CREDIT")) {
+          } else if (!type.includes("CARD")) {
             invoiceCashPortion += amt;
             hasCash = true;
           }
@@ -557,6 +572,16 @@ const getAllInvoices = async (companyId, workspaceId, filters = {}, pagination =
 
       const filterPm = String(filters.paymentMethod || "").trim().toLowerCase();
       if (filterPm === "cash" && hasCash) {
+        matchingSplitInvoices += 1;
+      } else if (filterPm === "upi" && hasUpi) {
+        matchingSplitInvoices += 1;
+      } else if ((filterPm === "creditnote" || filterPm === "credit note") && hasCreditNote) {
+        matchingSplitInvoices += 1;
+      } else if (filterPm === "credit" && hasCredit) {
+        matchingSplitInvoices += 1;
+      } else if (filterPm === "advance" && hasAdvance) {
+        matchingSplitInvoices += 1;
+      } else if (filterPm === "split" || filterPm === "all" || !filters.paymentMethod) {
         matchingSplitInvoices += 1;
       } else if (filterPm === "upi" && hasUpi) {
         matchingSplitInvoices += 1;

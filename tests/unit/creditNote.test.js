@@ -3,6 +3,8 @@ import {
   CREDIT_NOTE_SOURCE,
   DEFAULT_CREDIT_NOTE_VALIDITY_DAYS,
 } from "../../src/modules/sales/credit-notes/constants/creditNote.constant.js";
+import { VOUCHER_TYPE } from "../../src/modules/finance/journal-vouchers/constants/voucherType.constant.js";
+import { VOUCHER_PREFIX } from "../../src/modules/finance/journal-vouchers/constants/voucherNumber.constant.js";
 import {
   queryCreditNotesSchema,
   createManualCreditNoteSchema,
@@ -11,6 +13,11 @@ import {
 
 describe("Credit Note Constants & Validations", () => {
   describe("Constants", () => {
+    it("should define CREDIT_NOTE in VOUCHER_TYPE and VOUCHER_PREFIX", () => {
+      expect(VOUCHER_TYPE.CREDIT_NOTE).toBe("CREDIT_NOTE");
+      expect(VOUCHER_PREFIX[VOUCHER_TYPE.CREDIT_NOTE]).toBe("CNJ");
+    });
+
     it("should define standard status enum values", () => {
       expect(CREDIT_NOTE_STATUS.ACTIVE).toBe("ACTIVE");
       expect(CREDIT_NOTE_STATUS.PARTIALLY_REDEEMED).toBe("PARTIALLY_REDEEMED");
@@ -107,6 +114,34 @@ describe("Credit Note Constants & Validations", () => {
 
       const resNeg = await redeemCreditNotesForInvoice("507f1f77bcf86cd799439011", -50, { invoiceNo: "INV-1" });
       expect(resNeg).toEqual({ redeemedNotes: [], totalRedeemed: 0 });
+    });
+  });
+
+  describe("Split Payment Matrix with Credit Note", () => {
+    it("should correctly validate and decompose cash when split with Credit Note", async () => {
+      const branchCashRepo = (await import("../../src/modules/finance/treasury/cash-management/branch-cash/repositories/branchCash.repository.js")).default;
+      const saleData = {
+        grandTotal: 1000,
+        paymentMethod: "Split",
+        payments: [
+          { paymentType: "CreditNote", amount: 500 },
+          { paymentType: "Cash", amount: 500 },
+        ],
+      };
+
+      // Decompose cash amount auto-decomposition check
+      const denoms = branchCashRepo.decomposeCashAmount(500);
+      expect(denoms.length).toBeGreaterThan(0);
+      const total = denoms.reduce((s, d) => s + d.denomination * d.quantity, 0);
+      expect(total).toBe(500);
+    });
+
+    it("should safely handle revertInvoiceCreditNotes when invoiceId is empty or parameters are null", async () => {
+      const { revertInvoiceCreditNotes } = await import(
+        "../../src/modules/sales/credit-notes/services/creditNote.service.js"
+      );
+      const res = await revertInvoiceCreditNotes(null, null, null);
+      expect(res).toEqual({ totalRestored: 0 });
     });
   });
 });

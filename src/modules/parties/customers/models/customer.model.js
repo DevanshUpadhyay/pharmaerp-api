@@ -378,6 +378,13 @@ customerSchema.index({
   isDeleted: 1,
 });
 
+customerSchema.index({
+  companyId: 1,
+  isDeleted: 1,
+  isWalkIn: -1,
+  updatedAt: -1,
+});
+
 const Customer =
   mongoose.models.Customer || mongoose.model("Customer", customerSchema);
 

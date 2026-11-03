@@ -136,14 +136,15 @@ const getCustomers = async (workspaceId, companyId, filters = {}, options = {}) 
   const limit = Math.min(100, Math.max(1, parseInt(options.limit) || 20));
   const skip = (page - 1) * limit;
 
-  let baseSort = { createdAt: -1 };
+  // Default to recently updated descending for pharmacy workflow, with createdAt fallback
+  let baseSort = { updatedAt: -1, createdAt: -1 };
   if (options.sort) {
     if (typeof options.sort === "object") {
       baseSort = options.sort;
     } else if (typeof options.sort === "string") {
-      const field = options.sort.startsWith("-") ? options.sort.slice(1) : options.sort;
-      const order = options.sort.startsWith("-") ? -1 : 1;
-      baseSort = { [field]: order };
+      const isDesc = options.sort.startsWith("-") || options.sort.endsWith(":desc");
+      const cleanField = options.sort.replace(/^-/, "").replace(/:desc$|:asc$/, "").trim();
+      baseSort = { [cleanField]: isDesc ? -1 : 1 };
     }
   }
   // Prioritize Walk-in customer first whenever it matches the query filters

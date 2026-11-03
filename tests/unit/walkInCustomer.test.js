@@ -101,22 +101,22 @@ describe("Walk-in Customer Architecture & Rules", () => {
       expect(sorted[2].name).toBe("Zydus Hospital");
     });
 
-    it("should construct repository sort with isWalkIn: -1 first", () => {
+    it("should construct repository sort with isWalkIn: -1 first and default to updatedAt: -1", () => {
       const buildSort = (optionsSort) => {
-        let baseSort = { createdAt: -1 };
+        let baseSort = { updatedAt: -1, createdAt: -1 };
         if (optionsSort) {
           if (typeof optionsSort === "object") {
             baseSort = optionsSort;
           } else if (typeof optionsSort === "string") {
-            const field = optionsSort.startsWith("-") ? optionsSort.slice(1) : optionsSort;
-            const order = optionsSort.startsWith("-") ? -1 : 1;
-            baseSort = { [field]: order };
+            const isDesc = optionsSort.startsWith("-") || optionsSort.endsWith(":desc");
+            const cleanField = optionsSort.replace(/^-/, "").replace(/:desc$|:asc$/, "").trim();
+            baseSort = { [cleanField]: isDesc ? -1 : 1 };
           }
         }
         return { isWalkIn: -1, ...baseSort };
       };
 
-      expect(buildSort()).toEqual({ isWalkIn: -1, createdAt: -1 });
+      expect(buildSort()).toEqual({ isWalkIn: -1, updatedAt: -1, createdAt: -1 });
       expect(buildSort({ name: 1 })).toEqual({ isWalkIn: -1, name: 1 });
       expect(buildSort("-name")).toEqual({ isWalkIn: -1, name: -1 });
     });
