@@ -225,13 +225,28 @@ const shiftSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
-    // Split Cash and UPI portion breakdown
+    // Split portion breakdown across all payment modes
     splitCashAmount: {
       type: Number,
       default: 0,
       min: 0,
     },
     splitUpiAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    splitCreditAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    splitAdvanceAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    splitCreditNoteAmount: {
       type: Number,
       default: 0,
       min: 0,
@@ -246,6 +261,30 @@ const shiftSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    pureCreditAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    pureAdvanceAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    pureCreditNoteAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    // Multi-mode split combinations breakdown (e.g. Cash + Credit Note, UPI + Advance)
+    splitCombinations: [
+      {
+        combination: { type: String, default: "" },
+        modes: [{ type: String }],
+        count: { type: Number, default: 0 },
+        totalAmount: { type: Number, default: 0 },
+      },
+    ],
     cashInvoiceCount: {
       type: Number,
       default: 0,
