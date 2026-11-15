@@ -70,6 +70,7 @@ const getCompanyBranches = async (companyId, options = {}) => {
     companyId,
     isDeleted: false,
   })
+    .populate("companyId", "name legalName code")
     .sort(options.sort || { createdAt: -1 })
     .select(options.select || "");
 };
@@ -83,6 +84,7 @@ const getWorkspaceBranches = async (workspaceId, options = {}) => {
     workspaceId,
     isDeleted: false,
   })
+    .populate("companyId", "name legalName code")
     .sort(options.sort || { createdAt: -1 })
     .select(options.select || "");
 };
