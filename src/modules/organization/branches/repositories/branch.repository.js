@@ -157,6 +157,22 @@ const countWorkspaceBranches = async (workspaceId) => {
   });
 };
 
+const promoteNextPrimaryBranch = async (companyId, excludeBranchId) => {
+  if (!mongoose.Types.ObjectId.isValid(companyId)) {
+    return null;
+  }
+
+  return Branch.findOneAndUpdate(
+    {
+      companyId,
+      _id: { $ne: excludeBranchId },
+      isDeleted: false,
+    },
+    { $set: { isPrimary: true } },
+    { new: true },
+  );
+};
+
 export default {
   findBranchById,
   findBranchByIdAndCompany,
@@ -174,4 +190,5 @@ export default {
 
   countCompanyBranches,
   countWorkspaceBranches,
+  promoteNextPrimaryBranch,
 };
